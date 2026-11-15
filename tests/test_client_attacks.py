@@ -51,11 +51,23 @@ class FindingTests(unittest.TestCase):
 
     def test_legit_controls_expose_false_positives(self):
         rows = evaluate_client_attacks()
-        self.assertEqual(metrics(rows["client_only"])["FP"], 2)
+        self.assertEqual(metrics(rows["client_only"])["FP"], 3)
         self.assertEqual(metrics(rows["server_only"])["FP"], 0)
         flagged_legit = {r["id"] for r in rows["combined"]
                          if not r["policy_violation"] and r["detected"]}
-        self.assertEqual(flagged_legit, {"CL03", "CL04"})
+        self.assertEqual(flagged_legit, {"CL03", "CL04", "CL06"})
+
+    def test_server_catches_client_attack_once_it_breaks_a_rule(self):
+        sc = BY_ID["CA15"]
+        self.assertFalse(run_scenario(sc, True, False)["detected"])    # monitor disabled
+        row = run_scenario(sc, False, True)
+        self.assertTrue(row["detected"])
+        self.assertEqual(row["server_rejections"], ["speed_violation"])
+
+    def test_human_movement_is_accepted(self):
+        row = run_scenario(BY_ID["CL05"], True, True)
+        self.assertFalse(row["detected"])
+        self.assertEqual(row["actions"], 8)
 
     def test_human_firing_is_irregular_but_accepted(self):
         row = run_scenario(BY_ID["CL01"], True, True)

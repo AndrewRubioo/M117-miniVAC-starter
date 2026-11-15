@@ -1,7 +1,7 @@
 # Client Attack Log (MiniVAC)
 
 **Owner:** Andrew (client attack) · **Team:** Team VAC (Team 21) · **Started:** 2026-11-15
-**Status:** 14 attack scenarios and 4 legitimate controls implemented, tested and documented. Backlog in section 7.
+**Status:** 15 attack scenarios and 6 legitimate controls implemented, tested and documented. Backlog in section 7.
 
 Update this file whenever something is tried, tested or implemented. Section 4 is append-only; everything else can be edited. The results table in section 3 comes from the code, so regenerate it rather than editing by hand.
 
@@ -43,10 +43,13 @@ Ground truth and detection per mode. "Client only" runs the toy monitor with per
 | CA12 | allowlist_edited | violation | The allowlist is client-side data the attacker can edit, so the plugin becomes 'approved'. | not flagged | not flagged | not flagged |
 | CA13 | macro_fire_on_cooldown_edge | violation | A client-side script fires as fast as the server allows. Every request is individually legal, so rule checks cannot object. | not flagged | not flagged | not flagged |
 | CA14 | movement_at_speed_limit | violation | A client-side script rides the server's limit. No single action breaks a rule. | not flagged | not flagged | not flagged |
+| CA15 | monitor_disabled_plus_teleport | violation | The client side is silenced, but the cheat's effect is an action no legitimate client could send, so the server rejects it regardless of the client. | not flagged | flagged | flagged |
 | CL01 | legit_human_firing | legit | Control: ordinary play, and the contrast case for CA13's perfect regularity. | not flagged | not flagged | not flagged |
 | CL02 | legit_approved_plugins | legit | Control: allowed plugins should never be flagged. | not flagged | not flagged | not flagged |
 | CL03 | legit_game_update_stale_baseline | legit | Control that exposes a false positive: the hash check cannot tell a patch from tampering. | flagged | not flagged | flagged |
 | CL04 | legit_third_party_overlay | legit | Control that exposes a false positive: the allowlist cannot tell a benign tool from a cheat. | flagged | not flagged | flagged |
+| CL05 | legit_human_movement | legit | Control: ordinary movement, and the contrast case for CA14's exact speed-limit riding. | not flagged | not flagged | not flagged |
+| CL06 | legit_missing_asset | legit | Control that exposes a false positive: the guard cannot tell a missing file from CA03's deliberate deletion. | flagged | not flagged | flagged |
 
 ### Summary by category (combined mode)
 
@@ -58,10 +61,11 @@ Ground truth and detection per mode. "Client only" runs the toy monitor with per
 | Monitor tampering | CA04, CA11, CA12 | 0 of 3 |
 | Timing evasion | CA05, CA10 | 0 of 2 |
 | In-bounds input automation | CA13, CA14 | 0 of 2 |
-| **All attacks** | 14 | **6 of 14 (TPR 43%)** |
-| Legitimate controls flagged | CL01–CL04 | 2 of 4 (FPR 50%) |
+| Client tamper + illegal action | CA15 | 1 of 1 (server rejects) |
+| **All attacks** | 15 | **7 of 15 (TPR 47%)** |
+| Legitimate controls flagged | CL01–CL06 | 3 of 6 (FPR 50%) |
 
-Server only caught 0 of 14: none of these attacks produce an action the server rules reject, which is the point of the design.
+Server only caught 1 of 15: only CA15 produces an action the server rules reject. The other 14 stay inside the rules, which is the point of their design.
 
 ## 4. Experiment log (append new entries at the bottom)
 
@@ -91,19 +95,29 @@ Tried candidate attacks directly against `ClientGuard` and `GameServer` to decid
 - Over HTTP with the real clock, 10 shots sent 0.31 s apart were all accepted: the CA13 macro-fire result holds outside the fake clock too.
 - Gap: the API exposes only the server. The client guard has no network endpoint, so asset, plugin and monitor attacks cannot be sent over HTTP, and no client report crosses the network. A client that reports its scan results to the server would be needed to demonstrate CA11-style forging over the wire.
 
+### 2026-11-15, entry 5: three scenarios added before the midterm freeze
+- Added CA15 (monitor disabled plus a 20-unit move), CL05 (human movement at varying speeds under the limit) and CL06 (asset missing for a legitimate reason).
+- Why: with 14 attacks the server caught 0, which could suggest it adds nothing. CA15 shows the server rejects a client attack once its effect breaks a rule, regardless of the client. CL05 gives CA14 a human contrast case, as CL01 does for CA13. CL06 is the legitimate twin of CA03 and shows the same check flagging both.
+- Result: 17 tests pass (7 original, 10 client-attack). Combined mode: TPR 47% (7 of 15), FPR 50% (3 of 6). Server only: 1 of 15. Figure regenerated.
+- This is the version to present at the midterm; no defense code changed.
+
+### 2026-11-15, entry 6: API flow figure for the midterm
+- Added `docs/figures/api_flow.png` (and `.svg`): the client sends JSON to `POST /action`, the server runs request-shape, action, speed-limit and cooldown checks on its own clock, then accepts or rejects. The figure also shows that the client guard has no endpoint.
+- Every result on the figure comes from the HTTP check in entry 4; no code changed.
+
 ## 5. Key findings (for the report and slides)
 
 1. **The client cannot vouch for itself.** Rewriting the baseline hash (CA04), forging the monitor's output (CA11) and editing the allowlist (CA12) each defeat client checks completely, and the server cannot see them either.
 2. **Point-in-time checks leave gaps.** Reverting a change before the next scan (CA05) or loading a plugin after the only scan (CA10) leaves the monitor with nothing to report.
 3. **Name-based trust is weak.** An allowlist checks what a plugin calls itself, so a plugin named `hud` passes (CA09). Near-miss names are caught, but only because matching is exact.
-4. **Rule checks cannot catch automation that stays in bounds.** Scripted firing and movement at the exact limits (CA13, CA14) pass every server rule, which is the toy-model analog of the "humanized" behavior that motivates statistical detection (e.g. XGuardian). CL01 provides the human contrast case for any future timing-based detector.
-5. **Client-side defenses create false positives.** Both controls CL03 and CL04 are flagged, giving a nonzero FPR for the first time and a concrete example of the detection vs. false-positive tradeoff.
-6. **Defenses complement each other.** Client checks catch the naive tampering the server cannot see; the server catches illegal actions the client cannot report. Neither covers the blind spots above.
+4. **Rule checks cannot catch automation that stays in bounds.** Scripted firing and movement at the exact limits (CA13, CA14) pass every server rule, which is the toy-model analog of the "humanized" behavior that motivates statistical detection (e.g. XGuardian). CL01 and CL05 provide the human contrast cases for any future timing- or speed-based detector.
+5. **Client-side defenses create false positives.** Three controls (CL03, CL04, CL06) are flagged, each by the same check that catches an attack (CA01–CA03, CA06–CA08, CA03). Lowering false positives by loosening those checks would lower detection too.
+6. **Defenses complement each other.** Client checks catch the naive tampering the server cannot see. The server catches a client attack once its effect breaks a rule, even with the monitor disabled (CA15). Neither covers the blind spots above.
 
 ## 6. Limitations and threats to validity
 
 - Toy 1D game, deterministic fake clock, no latency or jitter, no randomness, so repeated runs give identical results.
-- The scenario mix drives the headline numbers. The 80% TPR in the original suite and 43% here are **not comparable**; both reflect the scenarios we chose, and the contrast shows how sensitive the metric is to that choice.
+- The scenario mix drives the headline numbers. The 80% TPR in the original suite and 47% here are **not comparable**; both reflect the scenarios we chose, and the contrast shows how sensitive the metric is to that choice.
 - Combined mode ORs client alerts with server rejections. The harness does not model the network channel that would carry client reports, so forging is simulated by changing the monitor's output (CA11).
 - Labels are policy violations we assigned. CA13 and CA14 are labeled violations because they represent automation, even though no server rule is broken.
 - Sample sizes are tiny; treat the tables as illustrations of mechanisms, not statistics.
@@ -125,12 +139,12 @@ Tried candidate attacks directly against `ClientGuard` and `GameServer` to decid
 ```bash
 python run_client_attacks.py            # prints results, writes client_attack_results.csv
 python run_client_attacks.py --markdown # regenerates the table in section 3
-python -m unittest discover -s tests -v # 15 tests
+python -m unittest discover -s tests -v # 17 tests
 ```
 
 ## 9. Material for the midterm slides
 
 - **Slide idea 1: how client attacks work.** The four levers from section 2, one line each.
 - **Slide idea 2: results by category.** The summary table in section 3.
-- **Slide idea 3: takeaway.** Client checks catch naive tampering (6 of 6) and miss everything the client controls or that stays in bounds (0 of 8); legit changes cause false positives (2 of 4).
+- **Slide idea 3: takeaway.** Client checks catch naive tampering (6 of 6) and miss everything the client controls or that stays in bounds (0 of 8). The server catches a client attack only once it produces an illegal action (CA15). Legit cases are flagged 3 of 6 times.
 - **Speaker note:** state clearly that this is a toy model and the numbers show mechanisms, not VAC performance.

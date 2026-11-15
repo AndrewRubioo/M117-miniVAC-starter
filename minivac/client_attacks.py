@@ -158,6 +158,26 @@ def _third_party_overlay(env):
     env.scan(); _play(env)
 
 
+# ---- client tamper that also produces an illegal action ------------------------
+def _disabled_monitor_teleport(env):
+    env.asset.write_text("Modified test asset\n", encoding="utf8")
+    env.guard.active = False                     # silence the client monitor
+    env.scan()
+    env.act("move", 20.0)                        # effect of the cheat reaches the server
+
+# ---- more legitimate controls --------------------------------------------------
+def _human_movement(env):
+    for gap, dx in ((0.2, 0.3), (0.15, 0.6), (0.3, 1.1), (0.25, 0.9),
+                    (0.1, 0.35), (0.35, 1.4), (0.2, 0.5), (0.18, 0.7)):
+        env.clock.advance(gap)
+        env.act("move", dx)                      # varying speed, always under the limit
+    env.scan()
+
+def _missing_asset_legit(env):
+    env.asset.unlink()                           # incomplete install or antivirus quarantine
+    env.scan(); _play(env)
+
+
 T, F = True, False
 SCENARIOS: list[ClientScenario] = [
     ClientScenario("CA01", "asset_append_byte", "asset_tampering", T,
@@ -216,6 +236,10 @@ SCENARIOS: list[ClientScenario] = [
         "100 moves, each exactly at the speed limit.",
         "A client-side script rides the server's limit. No single action breaks a rule.",
         _max_speed_moves, (F, F, F)),
+    ClientScenario("CA15", "monitor_disabled_plus_teleport", "illegal_action_effect", T,
+        "Disable the monitor and tamper, then make a 20-unit move.",
+        "The client side is silenced, but the cheat's effect is an action no legitimate client could send, so the server rejects it regardless of the client.",
+        _disabled_monitor_teleport, (F, T, T)),
     ClientScenario("CL01", "legit_human_firing", "legit_control", F,
         "8 shots with irregular gaps above the cooldown.",
         "Control: ordinary play, and the contrast case for CA13's perfect regularity.",
@@ -232,6 +256,14 @@ SCENARIOS: list[ClientScenario] = [
         "A harmless overlay plugin that is not on the allowlist.",
         "Control that exposes a false positive: the allowlist cannot tell a benign tool from a cheat.",
         _third_party_overlay, (T, F, T)),
+    ClientScenario("CL05", "legit_human_movement", "legit_control", F,
+        "8 moves at varying speeds, always under the limit.",
+        "Control: ordinary movement, and the contrast case for CA14's exact speed-limit riding.",
+        _human_movement, (F, F, F)),
+    ClientScenario("CL06", "legit_missing_asset", "legit_control", F,
+        "Asset file missing because of an incomplete install or antivirus quarantine.",
+        "Control that exposes a false positive: the guard cannot tell a missing file from CA03's deliberate deletion.",
+        _missing_asset_legit, (T, F, T)),
 ]
 BY_ID = {s.id: s for s in SCENARIOS}
 
