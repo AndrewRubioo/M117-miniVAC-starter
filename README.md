@@ -26,6 +26,23 @@ python -m unittest discover -s tests -v
 The first command writes `experiment_results.csv`. Its numbers only represent
 the synthetic cases supplied in the demo, **not actual detection efficacy**.
 
+## Client defense v2 (Arian, `client-defense` branch)
+
+A hardened client guard evaluated against the client-attack scenarios, alongside
+the starter guard rather than replacing it:
+
+- `minivac/manifest.py`: authenticated baseline manifest (asset and plugin digests with an HMAC tag).
+- `minivac/client_defense.py`: guard that verifies the manifest, allowlists plugins by content, gates plugin loads, and reports its measurements.
+- `minivac/integrity_verifier.py`: server-side check of those reports against the server's own manifest, with replay and silence detection.
+
+```bash
+python run_client_defense.py
+```
+
+This writes `client_defense_results.csv` and `client_defense_scan_sweep.csv`.
+Design, results and limitations are in `docs/CLIENT_DEFENSE_LOG.md`. A client
+report is a claim made by an untrusted machine; it is not remote attestation.
+
 ## Run a real client/server process boundary (optional)
 
 ```bash
