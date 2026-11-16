@@ -56,7 +56,14 @@ def official_manifest(version: int, asset_text: str) -> Manifest:
 
 
 class _LegacyPluginNames(list):
-    """Lets Andrew's `env.plugins.append(name)` run unchanged against v2."""
+    """Lets Andrew's `env.plugins.append(name)` run unchanged against v2.
+
+    The starter env keeps plugins as a list of names. v2 keeps (name, content)
+    records in `env.loaded`, so this is a snapshot of the names whose edits are
+    written through to `env.loaded`. An edit it cannot carry over raises: editing
+    only the snapshot would run the scenario without the change it asked for,
+    and its result would be reported as if nothing were wrong.
+    """
 
     def __init__(self, env: "DefenseEnv") -> None:
         super().__init__(plugin.name for plugin in env.loaded)
@@ -64,6 +71,28 @@ class _LegacyPluginNames(list):
 
     def append(self, name: str) -> None:
         self._env.inject_plugin(name)
+        super().append(name)
+
+    def extend(self, names) -> None:
+        for name in names:
+            self.append(name)
+
+    def remove(self, name: str) -> None:
+        super().remove(name)  # ValueError if it is not loaded, as a plain list would
+        loaded = self._env.loaded
+        del loaded[next(i for i, plugin in enumerate(loaded) if plugin.name == name)]
+
+    def clear(self) -> None:
+        self._env.loaded.clear()
+        super().clear()
+
+    def _unsupported(self, *args, **kwargs):
+        raise NotImplementedError(
+            "env.plugins supports append, extend, remove and clear against v2. For anything "
+            "else use env.inject_plugin(name, content) or edit env.loaded directly.")
+
+    insert = pop = sort = reverse = _unsupported
+    __setitem__ = __delitem__ = __iadd__ = __imul__ = _unsupported
 
 
 @dataclass
@@ -81,7 +110,7 @@ class DefenseEnv:
     client_alerts: list[str] = field(default_factory=list)
     server_findings: list[str] = field(default_factory=list)
     actions: list[dict] = field(default_factory=list)
-    scans: int = 0
+    scans: int = 0                          # scans that ran; a disabled guard runs none
     reports: int = 0
     last_report: dict | None = None
     report_channel_up: bool = True
@@ -117,15 +146,17 @@ class DefenseEnv:
 
     def scan(self) -> list[str]:
         """One pass of the monitor. In combined mode the result goes to the server."""
-        self.scans += 1
         self._last_scan_at = self.clock()
         result = self.guard.scan({ASSET_NAME: self.asset}, list(self.loaded))
-        if result is None:  # monitor disabled: no alert, and no report either
+        if result is None:  # monitor disabled: no alert, no report, and no scan to count
             return []
+        self.scans += 1
         alerts = [str(event) for event in result.events]
         self._note_client_alerts(alerts)
-        pending, self._pending = self._pending, []
         if self.verifier is not None and self.report_channel_up:
+            # Blocked loads wait here until a report gets through; an outage delays
+            # them, it does not lose them.
+            pending, self._pending = self._pending, []
             self.last_report = build_report(PLAYER, self.verifier.challenge(PLAYER),
                                             result, pending)
             self.reports += 1
@@ -202,9 +233,15 @@ def _forge_monitor(env: DefenseEnv) -> None:
     own disk. From here on the honest timer keeps firing, each "scan" returns
     the expected values, and each report carries a fresh nonce."""
     clean = env.guard.signed_manifest.manifest.copy()
-    env.guard.scan = lambda assets, loaded_plugins: ScanResult(
-        events=[], assets=dict(clean.assets),
-        plugins=[("hud", clean.plugins["hud"])], manifest_version=clean.version)
+
+    def forged_scan(assets, loaded_plugins):
+        if not env.guard.active:  # server_only mode: there is no monitor to impersonate
+            return None
+        return ScanResult(events=[], assets=dict(clean.assets),
+                          plugins=[("hud", clean.plugins["hud"])],
+                          manifest_version=clean.version)
+
+    env.guard.scan = forged_scan
 
 
 # ---- v2 translations of the four scenarios tied to starter-guard internals -------

@@ -5,13 +5,13 @@ from minivac import client_attacks
 from minivac.client_attacks import ClientScenario
 from minivac.client_defense import (SUGGESTED_RESPONSE, HardenedClientGuard, LoadedPlugin,
                                     build_report)
-from minivac.client_defense_eval import (BY_ID, EXPECTED_V2, LEGACY_IDS, MODES,
-                                         NEW_SCENARIOS, OFFICIAL_PLUGINS, SCENARIOS,
-                                         V2_TRANSLATIONS, evaluate_defense,
-                                         evaluate_starter, official_manifest, run_defended,
-                                         scan_window_experiment)
+from minivac.client_defense_eval import (BY_ID, CHEAT_BYTES, EXPECTED_V2, LEGACY_IDS, MODES,
+                                         NEW_SCENARIOS, OFFICIAL_PLUGINS, SCAN_INTERVAL,
+                                         SCENARIOS, V2_TRANSLATIONS, _translated,
+                                         evaluate_defense, evaluate_starter, official_manifest,
+                                         run_defended, scan_window_experiment)
 from minivac.experiments import CONFIGURATIONS, FakeClock, metrics
-from minivac.integrity_verifier import (REPORT_DEADLINE, REPORT_MALFORMED,
+from minivac.integrity_verifier import (CLIENT_DECLARED, REPORT_DEADLINE, REPORT_MALFORMED,
                                         REPORT_NONCE_INVALID, REPORT_OVERDUE,
                                         IntegrityVerifier)
 from minivac.manifest import (ASSET_MISSING, ASSET_MODIFIED, MANIFEST_AUTH_FAILED,
@@ -21,6 +21,11 @@ from minivac.manifest import (ASSET_MISSING, ASSET_MODIFIED, MANIFEST_AUTH_FAILE
 ASSET = "test_game_asset.txt"
 OFFICIAL_TEXT = "Official test asset v1\n"
 HUD = LoadedPlugin("hud", OFFICIAL_PLUGINS["hud"])
+
+
+def probe(run, violation=True):
+    """A throwaway scenario for testing the harness itself. Its ID is not one of Andrew's."""
+    return ClientScenario("TEST", "probe", "probe", violation, "probe", "probe", run, (False,) * 3)
 
 
 class ManifestTests(unittest.TestCase):
@@ -279,6 +284,16 @@ class EvaluationTests(unittest.TestCase):
         with self.assertRaises(RuntimeError):
             run_defended(fake, True, True)
 
+    def test_scenario_added_to_andrews_catalogue_runs_before_it_has_an_expectation(self):
+        # What happens the day client_attacks.py gains CA16: the runner keeps
+        # working, and test_results_match_expected_detection asks for its outcome.
+        future = client_attacks.ClientScenario(
+            "CA16", "future_attack", "x", True, "x", "x", BY_ID["CA01"].run, (True, False, True))
+        translated = _translated(future)
+        self.assertIsNone(translated.expected_detected)
+        self.assertIs(translated.run, future.run)
+        self.assertTrue(run_defended(translated, True, True)["detected"])
+
     def test_server_only_is_identical_to_the_starter(self):
         self.assertEqual(self.flagged(self.defended, "server_only", LEGACY_IDS),
                          self.flagged(self.starter, "server_only"))
@@ -355,6 +370,59 @@ class EvaluationTests(unittest.TestCase):
         self.assertEqual(row["server_findings"], [])                          # never arrived
         self.assertFalse(row["detected"])
         self.assertEqual(row["actions"], 6)   # 3 s of play, under the report deadline
+
+    def test_injected_plugin_that_stays_loaded_is_caught_at_the_next_timed_scan(self):
+        # CA10 is a miss only because its script ends before the next scan is due.
+        def ca10_then_keep_playing(env):
+            BY_ID["CA10"].run(env)
+            for _ in range(6):                               # 3 s more of ordinary play
+                env.clock.advance(0.5)
+                env.act("move", 0.4)
+        scenario = probe(ca10_then_keep_playing)
+        for mode in ("client_only", "combined"):
+            row = run_defended(scenario, *CONFIGURATIONS[mode])
+            self.assertEqual(row["client_alerts"], [f"{PLUGIN_NOT_APPROVED}:'cheat_plugin'"], mode)
+            self.assertEqual(row["latency_s"], SCAN_INTERVAL, mode)
+        self.assertFalse(run_defended(scenario, *CONFIGURATIONS["server_only"])["detected"])
+
+    def test_blocked_load_is_reported_once_reports_get_through_again(self):
+        def blocked_during_outage(env):
+            env.report_channel_up = False
+            env.load_plugin("cheat_plugin", CHEAT_BYTES)     # refused while nothing can be sent
+            env.report_channel_up = True
+            env.scan()
+        row = run_defended(probe(blocked_during_outage), True, True)
+        self.assertEqual(row["server_findings"],
+                         [f"{CLIENT_DECLARED}:{PLUGIN_BLOCKED}:'cheat_plugin'"])
+
+    def test_only_scans_that_ran_are_counted(self):
+        for row in self.defended["server_only"]:             # no guard, so no scans
+            self.assertEqual((row["scans"], row["reports"]), (0, 0), row["id"])
+        for row in self.defended["client_only"]:             # no verifier, so no reports
+            self.assertEqual(row["reports"], 0, row["id"])
+        for row in self.defended["combined"]:                # every scan is reported...
+            if row["id"] not in {"DA08", "DL03"}:            # ...unless the channel is cut
+                self.assertEqual(row["scans"], row["reports"], row["id"])
+
+    def test_legacy_plugin_list_edits_reach_the_v2_client_or_fail_loudly(self):
+        seen = {}
+        def edits_the_plugin_list(env):
+            env.plugins.extend(["overlay", "accessibility"])
+            env.plugins.remove("overlay")
+            seen["names"] = list(env.plugins)
+            seen["loaded"] = [(plugin.name, plugin.content) for plugin in env.loaded]
+            with self.assertRaises(ValueError):
+                env.plugins.remove("never_loaded")
+            for unsupported in (lambda: env.plugins.insert(0, "cheat_plugin"),
+                                lambda: env.plugins.pop()):
+                with self.assertRaises(NotImplementedError):
+                    unsupported()
+            with self.assertRaises((AttributeError, NotImplementedError)):
+                env.plugins = ["cheat_plugin"]
+        run_defended(probe(edits_the_plugin_list, violation=False), True, False)
+        self.assertEqual(seen["names"], ["hud", "accessibility"])
+        self.assertEqual(seen["loaded"], [("hud", OFFICIAL_PLUGINS["hud"]),
+                                          ("accessibility", OFFICIAL_PLUGINS["accessibility"])])
 
     def test_new_scenarios_are_documented_and_do_not_reuse_andrews_ids(self):
         ids = [s.id for s in SCENARIOS]

@@ -11,7 +11,7 @@ This is the companion to `docs/CLIENT_ATTACK_LOG.md`. Scenario IDs starting CA a
 - **More of Andrew's attacks are caught.** The starter guard caught 6 of his 15 attacks on its own and 7 in combined mode. v2 catches 9 on its own and 10 in combined mode. The three gained are CA04, CA09 and CA12: the attacks that edited the guard's reference data or reused an approved plugin name.
 - **The false positives did not move.** Three of his six legitimate controls were flagged before (CL03, CL04, CL06) and the same three are flagged now. v2 names them more precisely and attaches a "repair" or "block" response instead of a ban, but it still cannot tell them from attacks.
 - **Four new attacks are caught only when both sides cooperate.** Switching the guard off (DA01), replaying an old report (DA02), replacing the key the guard trusts (DA04) and rolling back to an old signed manifest (DA05) are missed by the client alone and by the server alone, and caught in combined mode.
-- **Eight attacks still get past combined mode:** forged reports (CA11, DA03), code hidden from the guard (DA06), changes made only between scans (CA05, CA10), input automation that stays inside the rules (CA13, CA14), and dropping reports then leaving early (DA08). The first seven are missed in every mode. In DA08 the guard raises a local alert that never reaches the server.
+- **Eight attacks still get past combined mode:** forged reports (CA11, DA03), code hidden from the guard (DA06), a file change undone before the next scan (CA05), a plugin injected after the last scan of a session that then ends (CA10), input automation that stays inside the rules (CA13, CA14), and dropping reports then leaving early (DA08). The first seven are missed in every mode. In DA08 the guard raises a local alert that never reaches the server.
 - **The new server-side check has a cost.** An honest client whose reports cannot be delivered is flagged (DL03). That is a false positive v2 introduced.
 
 These are results from a toy model with scenarios we chose. They show mechanisms. They are not detection rates for VAC or for any real anti-cheat.
@@ -32,7 +32,7 @@ These are results from a toy model with scenarios we chose. They show mechanisms
 | `minivac/integrity_verifier.py` | Server (trusted) | `IntegrityVerifier`: judges the client's reports against the server's own manifest and notices when reports stop |
 | `minivac/client_defense_eval.py` | Test harness | Runs every scenario against v2 in the three modes, plus the scan-interval sweep |
 | `run_client_defense.py` | | Prints results, writes `client_defense_results.csv` and `client_defense_scan_sweep.csv` |
-| `tests/test_client_defense.py` | | 50 tests |
+| `tests/test_client_defense.py` | | 55 tests |
 
 Each feature below lists the problem, the attack it answers, how it works, what it does not stop, and the test that covers it.
 
@@ -57,8 +57,8 @@ Each feature below lists the problem, the attack it answers, how it works, what 
 - **Problem:** the starter guard looks at plugins only when a scan runs, so anything loaded afterwards is never examined.
 - **Attack:** CA10's timing, when the load goes through the game's own loader (DA07).
 - **How it works:** the loader asks `authorize_plugin` before loading. An unapproved plugin is refused and a `plugin_blocked` event is raised. This is prevention at the moment of use instead of detection at the next poll, which is the complete-mediation principle. It is inspired by the idea behind Trusted Mode: restrict what may run alongside the game by default.
-- **Does not stop:** code injected around the loader. CA10 as Andrew wrote it appends to the plugin list directly, and v2 still misses it.
-- **Tests:** `GuardTests.test_load_gate_*`, `EvaluationTests.test_load_gate_blocks_the_cheat_and_admits_the_approved_plugin`.
+- **Does not stop:** code injected around the loader. CA10 as Andrew wrote it appends to the plugin list directly and ends before the next scan is due, so v2 still misses it. That miss depends on the session being short: if the same plugin stays loaded while play continues, the next timed scan flags it 2 s later. An attacker who unloads it before each scan is back to the CA05 pattern in section 4.4.
+- **Tests:** `GuardTests.test_load_gate_*`, `EvaluationTests.test_load_gate_blocks_the_cheat_and_admits_the_approved_plugin`, `test_injected_plugin_that_stays_loaded_is_caught_at_the_next_timed_scan`.
 
 ### 3.4 Typed events with a suggested response
 
@@ -161,6 +161,8 @@ This is the view to use in the report. Each row is one more thing the attacker c
 
 Detection delay, in simulated seconds from the start of the scenario: 5.5 s for DA01 (first action after the 5 s deadline), 0.5 s for DA02 (first replay attempt), and 0 for everything else that is caught. The fake clock has no network or processing delay, so these are lower bounds.
 
+The "between scans" row needs care. CA05 is a real gap: the change is gone before any scan can see it. CA10 is a miss because its script ends right after the injection. The starter harness never scans again, but v2 scans every 2 s, so the same plugin left in place is flagged at the next scan (a test covers this; it is not a catalogue scenario).
+
 ### 4.4 How much does scanning more often help? (CA05)
 
 The attacker modifies the asset for a while and restores it. The guard scans on a fixed interval with a random phase. 200 seeded trials per cell for the blind attacker, 30-second sessions, real guard on a real temporary file under the fake clock.
@@ -186,6 +188,8 @@ Measured with `python run_client_defense.py --overhead` on an Apple M4 Pro, Pyth
 ## 5. The four scenarios that needed a v2 translation
 
 Seventeen of Andrew's scenario functions run against v2 unchanged. Four reach into attributes that only the starter guard has, so the same move is re-expressed against v2. A test asserts that these four are the only ones, and the harness raises an error if an untranslated scenario touches starter-guard internals, so a future scenario cannot be misreported silently.
+
+The unchanged seventeen rely on one bridge: `env.plugins` looks like the starter's list of names, and `append`, `extend`, `remove` and `clear` on it are carried over to v2's loaded plugins. Any other edit to that list raises an error instead of being ignored. A name added this way gets the official content if it is an official plugin and other content if it is not.
 
 | ID | Starter guard | v2 |
 |---|---|---|
@@ -213,7 +217,7 @@ Andrew, please check that these are fair to what you intended. CA04 and CA12 are
 - The scenario mix drives every count. We wrote the DA scenarios knowing how v2 works, which is the point of them, and also why their totals are not a detection rate.
 - HMAC stands in for a public-key signature. In the toy the guard is handed the publisher's `verify` method, which carries the secret key. A real client would not hold it.
 - The guard's timer is simulated: a scan is run when the client is about to act and the interval has elapsed. A real monitor runs on its own thread.
-- The guard scans once at launch before each scenario starts. The starter harness does not, so scan counts are not comparable between the two.
+- The guard scans once at launch before each scenario starts, and the starter harness does not. The `scans` column also means different things: here it counts scans that ran (none when the guard is off), and in `client_attack_results.csv` it counts every call. Do not compare scan counts between the two files.
 - `IntegrityVerifier` does not authenticate who is submitting. Anyone can submit a report under another player's ID, which would spend that player's nonce and get them flagged. The existing API has no accounts either. This is a server-side attack worth writing up (see section 8).
 - Not modeled at all: reading or writing game memory, which Collins et al. (2024) treat as the basic cheat primitive, and kernel-level anti-cheat.
 - Sample sizes are tiny outside the sweep. The sweep is a Monte Carlo estimate of a simple probability and matches it; it is evidence that the harness works, not a discovery.
@@ -254,13 +258,23 @@ Items from section 7 of `CLIENT_ATTACK_LOG.md` that this work covers: periodic s
 - 13 were caught. The survivor: counting local alerts as detection in combined mode changed no outcome, because no scenario had an alert that failed to reach the server.
 - Added DA08 (drop the reports, leave before the deadline) to separate the two. All 14 are now caught. Totals: 32 scenarios, 67 tests (17 existing, 50 new).
 
+### 2026-11-16, entry 5: correctness review
+- No new commits on `origin` since entry 4 (`main` and `client-attacks` unchanged), so there was nothing to merge or adapt to.
+- Re-derived every number in sections 1 and 4 from a fresh run: the 4.1 table regenerates identically, the counts in 4.2 and 4.3 match, and the sweep CSV is unchanged.
+- Three harness fixes. None changes a detection outcome.
+  1. The `scans` column counted scan calls made while the guard was off, so every server-only row said 1. It now counts scans that ran. 30 cells of `client_defense_results.csv` changed, all in that column.
+  2. A `plugin_blocked` event raised while reports could not be delivered was dropped. It is now kept and sent with the next report that gets through. No catalogue scenario exercised this.
+  3. The bridge for Andrew's `env.plugins.append(...)` silently ignored every other list edit. It now carries over `extend`, `remove` and `clear` and raises on the rest (section 5).
+- Wording fix for CA10 (sections 1, 3.3 and 4.3): it is a miss because the script ends before the next scan, not because v2 cannot see an injected plugin.
+- 5 tests added, 72 in total (17 existing, 55 new). They pass on Python 3.10 to 3.14, and the CSV files are byte-identical on 3.10, 3.13 and 3.14. Mutation check repeated with 19 deliberate breaks, all caught.
+
 ## 10. How to reproduce
 
 ```bash
 python run_client_defense.py             # prints results, writes the two CSV files
 python run_client_defense.py --markdown  # regenerates the table in section 4.1
 python run_client_defense.py --overhead  # scan cost on your machine
-python -m unittest discover -s tests -v  # 67 tests
+python -m unittest discover -s tests -v  # 72 tests
 ```
 
 ## 11. Sources and what is ours
